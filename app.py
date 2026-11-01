@@ -4,6 +4,10 @@ import os
 from pathlib import Path
 from datetime import datetime
 
+from config import DB_PATH as APP_DB_PATH
+from memory.db import save_profile, _now
+
+
 st.set_page_config(page_title="AI Counsellor", layout="wide")
 
 env_path = Path(".env")
@@ -236,15 +240,22 @@ def page_profile():
         
         submitted = st.form_submit_button("Save Profile")
         if submitted:
-            save_profile({
-                "age": age, "height_cm": height_cm if height_cm > 0 else None,
-                "weight_kg": weight_kg if weight_kg > 0 else None,
-                "communication_style": comm_style or "", "likes": likes or "",
-                "dislikes": dislikes or "", "hobbies": hobbies or "",
-                "sensory_notes": sensory or "", "emergency_contact": profile.get("emergency_contact"),
-                "notes": notes or "", "ocd_themes": ocd_themes or "", "triggers": profile.get("triggers") or "",
-                "deescalation": deescalation or "", "family_context": family_context or ""
-            })
+            save_profile(
+                age=age if age > 0 else None,
+                height_cm=height_cm if height_cm > 0 else None,
+                weight_kg=weight_kg if weight_kg > 0 else None,
+                communication_style=comm_style or "",
+                likes=likes or "",
+                dislikes=dislikes or "",
+                hobbies=hobbies or "",
+                sensory_notes=sensory or "",
+                emergency_contact=profile.get("emergency_contact", ""),
+                notes=notes or "",
+                ocd_themes=ocd_themes or "",
+                triggers=profile.get("triggers", ""),
+                deescalation=deescalation or "",
+                family_context=family_context or ""
+            )
             st.success("✅ Profile saved!")
             st.rerun()
     
