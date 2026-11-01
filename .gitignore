@@ -1,0 +1,21 @@
+# Environment / secrets
+.env
+.env.local
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Runtime data
+data/
+memory/counsellor.db
+documents/files/
+documents/images/
+
+# OS / editor
+.DS_Store
+.Trash
+.ipynb_checkpoints/
