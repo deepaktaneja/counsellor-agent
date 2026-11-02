@@ -228,7 +228,7 @@ def init_profile_table():
     )""")
     # migrate older schemas: add missing columns
     existing = {r[1] for r in c.execute("PRAGMA table_info(profile)").fetchall()}
-    for col in ("ocd_themes", "triggers", "deescalation", "family_context"):
+    for col in ("ocd_themes", "triggers", "deescalation", "family_context", "name"):
         if col not in existing:
             c.execute(f"ALTER TABLE profile ADD COLUMN {col} TEXT")
     c.commit()
@@ -245,13 +245,13 @@ def get_profile():
 def save_profile(age=None, height_cm=None, weight_kg=None, communication_style="",
                  likes="", dislikes="", hobbies="", sensory_notes="",
                  emergency_contact="", notes="", ocd_themes="", triggers="",
-                 deescalation="", family_context=""):
+                 deescalation="", family_context="", name=""):
     c = _conn()
     cur = c.cursor()
     cur.execute("""INSERT INTO profile (id, updated_at, age, height_cm, weight_kg, communication_style,
                     likes, dislikes, hobbies, sensory_notes, emergency_contact, notes,
-                    ocd_themes, triggers, deescalation, family_context)
-                   VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ocd_themes, triggers, deescalation, family_context, name)
+                   VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET
                      updated_at=excluded.updated_at, age=excluded.age, height_cm=excluded.height_cm,
                      weight_kg=excluded.weight_kg, communication_style=excluded.communication_style,
@@ -259,10 +259,10 @@ def save_profile(age=None, height_cm=None, weight_kg=None, communication_style="
                      sensory_notes=excluded.sensory_notes, emergency_contact=excluded.emergency_contact,
                      notes=excluded.notes, ocd_themes=excluded.ocd_themes,
                      triggers=excluded.triggers, deescalation=excluded.deescalation,
-                     family_context=excluded.family_context""",
+                     family_context=excluded.family_context, name=excluded.name""",
                 (_now(), age, height_cm, weight_kg, communication_style, likes, dislikes,
                  hobbies, sensory_notes, emergency_contact, notes, ocd_themes, triggers,
-                 deescalation, family_context))
+                 deescalation, family_context, name))
     c.commit()
     c.close()
 

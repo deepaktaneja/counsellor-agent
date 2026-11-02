@@ -5,7 +5,7 @@ from pathlib import Path
 from datetime import datetime
 
 from config import DB_PATH as APP_DB_PATH
-from memory.db import save_profile, _now
+from memory.db import save_profile, get_profile, add_profile_history, list_profile_history, _now
 
 
 st.set_page_config(page_title="AI Counsellor", layout="wide")
@@ -31,16 +31,8 @@ def init_db():
     c = conn.cursor()
     c.execute("CREATE TABLE IF NOT EXISTS observations (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, raw_text TEXT, summary TEXT, tags TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, uploaded_at TEXT, doc_type TEXT, summary TEXT, full_text TEXT)")
-    c.execute("CREATE TABLE IF NOT EXISTS profile (id INTEGER PRIMARY KEY, updated_at TEXT, age INTEGER, height_cm REAL, weight_kg REAL, communication_style TEXT, likes TEXT, dislikes TEXT, hobbies TEXT, sensory_notes TEXT, emergency_contact TEXT, notes TEXT, ocd_themes TEXT, triggers TEXT, deescalation TEXT, family_context TEXT)")
-    c.execute("CREATE TABLE IF NOT EXISTS profile_history (id INTEGER PRIMARY KEY AUTOINCREMENT, recorded_at TEXT, height_cm REAL, weight_kg REAL, notes TEXT)")
     conn.commit()
     conn.close()
-
-def load_profile():
-    conn = get_db(); c = conn.cursor(); c.execute("SELECT * FROM profile WHERE id=1"); row = c.fetchone(); conn.close()
-    if row:
-        cols = [d[0] for d in c.description]; return dict(zip(cols, row))
-    return {}
 
 def load_observations():
     conn = get_db(); c = conn.cursor(); c.execute("SELECT * FROM observations ORDER BY id DESC"); rows = c.fetchall(); conn.close()
@@ -48,10 +40,6 @@ def load_observations():
 
 def load_documents():
     conn = get_db(); c = conn.cursor(); c.execute("SELECT * FROM documents ORDER BY id DESC"); rows = c.fetchall(); conn.close()
-    return [dict(r) for r in rows]
-
-def load_profile_history():
-    conn = get_db(); c = conn.cursor(); c.execute("SELECT * FROM profile_history ORDER BY id DESC LIMIT 30"); rows = c.fetchall(); conn.close()
     return [dict(r) for r in rows]
 
 def save_observation(raw_text, summary, tags=""):
@@ -153,7 +141,7 @@ def page_advisor():
     
     with st.sidebar:
         st.header("Profile Summary (from data)")
-        profile = load_profile()
+        profile = get_profile() or {}
         if profile.get("age"): st.caption(f"Age: {profile.get('age')}")
         if profile.get("ocd_themes"): st.caption(f"OCD themes: {profile.get('ocd_themes')[:80]}...")
         if profile.get("deescalation"): st.caption(f"Calms: {profile.get('deescalation')[:60]}...")
@@ -218,16 +206,19 @@ def page_advisor():
 
 def page_profile():
     st.title("👤 Son Profile")
-    profile = load_profile()
+    profile = get_profile() or {}
     
     with st.form("profile_form", clear_on_submit=False):
         c1, c2 = st.columns(2)
         with c1:
-            age = st.number_input("Age", 0, 100, profile.get("age") or 20)
-            height_cm = st.number_input("Height (cm)", 0, 250, profile.get("height_cm") or 0)
-            weight_kg = st.number_input("Weight (kg)", 0, 300, profile.get("weight_kg") or 0)
+            name = st.text_input("Name", value=profile.get("name") or "")
+            age = st.number_input("Age", 0, 100, int(profile.get("age") or 20))
+            height_cm = st.number_input("Height (cm)", 0, 250, int(profile.get("height_cm") or 0))
+            weight_kg = st.number_input("Weight (kg)", 0, 300, int(profile.get("weight_kg") or 0))
             comm_style = st.text_area("Communication style", value=profile.get("communication_style") or "")
             ocd_themes = st.text_area("OCD themes & compulsions", value=profile.get("ocd_themes") or "")
+
+
         with c2:
             likes = st.text_area("Likes", value=profile.get("likes") or "")
             dislikes = st.text_area("Dislikes", value=profile.get("dislikes") or "")
@@ -254,13 +245,20 @@ def page_profile():
                 ocd_themes=ocd_themes or "",
                 triggers=profile.get("triggers", ""),
                 deescalation=deescalation or "",
-                family_context=family_context or ""
+                family_context=family_context or "",
+                name=name or ""
             )
+            add_profile_history(
+                height_cm=height_cm if height_cm > 0 else None,
+                weight_kg=weight_kg if weight_kg > 0 else None,
+                notes=notes or "",
+            )
+
             st.success("✅ Profile saved!")
             st.rerun()
     
     st.markdown("### Profile History")
-    history = load_profile_history()
+    history = list_profile_history()
     if history:
         for h in history:
             with st.expander(f"Updated at {h.get('recorded_at','')}"):
@@ -270,7 +268,7 @@ def page_profile():
 
 def page_records():
     st.title("📄 Medical Records")
-    profile = load_profile()
+    profile = get_profile() or {}
     
     with st.sidebar:
         st.header("Data")
