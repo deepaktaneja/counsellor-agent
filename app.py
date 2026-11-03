@@ -77,6 +77,8 @@ def _detect_ext(buf):
 
 def transcribe_audio(audio_bytes):
     try:
+        if hasattr(audio_bytes, "read"):
+            audio_bytes = audio_bytes.read()
         ext = _detect_ext(audio_bytes)
         tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
         tmp.write(audio_bytes); tmp.close()
