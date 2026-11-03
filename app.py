@@ -81,15 +81,22 @@ def transcribe_audio(audio_bytes):
     try:
         if hasattr(audio_bytes, "read"):
             audio_bytes = audio_bytes.read()
+        if not audio_bytes:
+            st.warning("No audio data received.")
+            return ""
         ext = _detect_ext(audio_bytes)
         tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
         tmp.write(audio_bytes); tmp.close()
         segments, info = whisper_model.transcribe(tmp.name, beam_size=5)
         text = "".join(s.text for s in segments).strip()
         os.unlink(tmp.name)
+        if not text:
+            st.warning("Whisper returned no text.")
         return text
     except Exception as e:
-        st.error(f"Transcription error: {e}"); return ""
+        st.error(f"Transcription error: {e}")
+        import traceback; traceback.print_exc()
+        return ""
 
 def clean_for_tts(text):
     import re
