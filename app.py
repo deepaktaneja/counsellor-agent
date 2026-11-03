@@ -163,14 +163,18 @@ def page_advisor():
     if audio_bytes is not None:
         with st.spinner("Transcribing..."):
             transcript = transcribe_audio(audio_bytes)
-        split = extract_observation_question(transcript)
-        st.session_state["observation"] = split.get("observation", "")
-        st.session_state["question"] = split.get("question", transcript)
+        if transcript:
+            split = extract_observation_question(transcript)
+            st.session_state["observation"] = split.get("observation", "")
+            st.session_state["question"] = split.get("question", transcript) or transcript
+        else:
+            st.warning("Transcription returned no text. Please try again.")
     
     q = st.session_state.get("question", "")
+    obs = st.session_state.get("observation", "")
     c1, c2 = st.columns(2)
     with c1:
-        obs = st.text_area("📝 What did he do/say? (observation, to save)", value="", height=80)
+        obs = st.text_area("📝 What did he do/say? (observation, to save)", value=obs, height=80)
     with c2:
         quest = st.text_area("❓ What do I do right now? (your question)", value=q, height=80)
     
