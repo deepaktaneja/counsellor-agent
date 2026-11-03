@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
-from config import DB_PATH as APP_DB_PATH
+from config import DB_PATH as APP_DB_PATH, WHISPER_INITIAL_PROMPT
 from memory.db import save_profile, get_profile, add_profile_history, list_profile_history, _now
 from agents.advisor import advise, extract_observation_question
 
@@ -88,9 +88,13 @@ def transcribe_audio(audio_bytes):
         ext = _detect_ext(audio_bytes)
         tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
         tmp.write(audio_bytes); tmp.close()
-        segments, info = whisper_model.transcribe(tmp.name, beam_size=5)
+        segments, info = whisper_model.transcribe(tmp.name, beam_size=5, initial_prompt=WHISPER_INITIAL_PROMPT)
         text = "".join(s.text for s in segments).strip()
         os.unlink(tmp.name)
+        # Normalize common Whisper mis-hearings of "Anmol"
+        for wrong in ("anmol", "a mole", "an all", "anmol ", "anmol.", "anmol,"):
+            text = text.replace(wrong, "Anmol")
+        # Also fix "my son" -> keep as is, but ensure Anmol is capitalized
         if not text:
             st.warning("Whisper returned no text.")
         return text
@@ -126,7 +130,14 @@ def synthesize(text, backend=None, voice=None):
             wav_file = tempfile.mktemp(suffix=".wav")
             with open(txt_file, "w") as f:
                 f.write(text)
-            subprocess.run(["say", "-v", voice, "-o", wav_file, txt_file], check=True, capture_output=True)
+            try:
+                subprocess.run(["say", "-v", voice, "-o", wav_file, txt_file], check=True, capture_output=True)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                # Voice not installed or say command unavailable; TTS is optional
+                for fp in [txt_file, wav_file]:
+                    try: os.unlink(fp)
+                    except: pass
+                return None
             with open(wav_file, "rb") as f:
                 wav_bytes = f.read()
             for fp in [txt_file, wav_file]:
