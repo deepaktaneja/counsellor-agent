@@ -130,23 +130,38 @@ def synthesize(text, backend=None, voice=None):
             wav_file = tempfile.mktemp(suffix=".wav")
             with open(txt_file, "w") as f:
                 f.write(text)
-            try:
-                subprocess.run(["say", "-v", voice, "-o", wav_file, txt_file], check=True, capture_output=True)
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                # Voice not installed or say command unavailable; TTS is optional
+
+            wav_ok = False
+            for v in ([voice] if voice else []) + [None]:
+                try:
+                    cmd = ["say", "-o", wav_file, txt_file]
+                    if v:
+                        cmd = ["say", "-v", v, "-o", wav_file, txt_file]
+                    subprocess.run(cmd, check=True, capture_output=True)
+                    wav_ok = True
+                    break
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    continue
+
+            if not wav_ok:
                 for fp in [txt_file, wav_file]:
-                    try: os.unlink(fp)
-                    except: pass
+                    try:
+                        os.unlink(fp)
+                    except Exception:
+                        pass
                 return None
+
             with open(wav_file, "rb") as f:
                 wav_bytes = f.read()
             for fp in [txt_file, wav_file]:
-                try: os.unlink(fp)
-                except: pass
+                try:
+                    os.unlink(fp)
+                except Exception:
+                    pass
             return wav_bytes
         return None
-    except Exception as e:
-        st.error(f"TTS error: {e}"); return None
+    except Exception:
+        return None
 
 def distress_response():
     return "I'm concerned about what you've shared. Please consult with his counsellor."
@@ -197,38 +212,71 @@ def page_advisor():
         st.session_state["advice_played"] = False
         st.session_state["orig_advice"] = advice
         st.session_state["orig_question"] = quest.strip()
+        if "conversation" not in st.session_state:
+            st.session_state["conversation"] = []
+        st.session_state["conversation"].append({
+            "question": quest.strip(),
+            "observation": obs.strip(),
+            "advice": advice,
+        })
+        st.rerun()
+
+    # Display existing advice
+    if st.session_state.get("advice"):
         st.markdown("### Advice")
-        st.write(advice)
+        st.write(st.session_state["advice"])
         if not st.session_state.get("advice_played", False):
-            wav = synthesize(advice)
+            wav = synthesize(st.session_state["advice"])
             if wav:
                 st.audio(wav, format="audio/wav", autoplay=True)
                 st.session_state["advice_played"] = True
         
+
+
+    # Follow-up section - always available after first advice
+    if st.session_state.get("advice"):
         st.markdown("---")
         st.markdown("**Follow-up question**")
         fu_audio = st.audio_input("🎤", label_visibility="collapsed", key="fu_audio_input")
         if fu_audio is not None:
             with st.spinner("Transcribing follow-up..."):
                 fu_transcript = transcribe_audio(fu_audio)
-            st.session_state["fu_question"] = fu_transcript
+            if fu_transcript:
+                st.session_state["fu_question"] = fu_transcript
+            else:
+                st.warning("Transcription returned no text. Please try again.")
+
         fu_q = st.session_state.get("fu_question", "")
-        if fu_q.strip():
+        fu_text = st.text_input("Or type your follow-up question:", value=fu_q, key="fu_text_input")
+
+        if st.button("💬 Submit Follow-up") and fu_text.strip():
             with st.spinner("Generating follow-up advice..."):
-                fu_advice = advise(observation="", question=fu_q.strip(), prev_question=st.session_state.get("orig_question",""), prev_advice=st.session_state.get("orig_advice",""))
+                conv = st.session_state.get("conversation", [])
+                prev_q = conv[-1]["question"] if conv else ""
+                prev_a = conv[-1]["advice"] if conv else ""
+                fu_advice = advise(observation="", question=fu_text.strip(), prev_question=prev_q, prev_advice=prev_a)
             st.session_state["fu_advice"] = fu_advice
             st.session_state["fu_advice_played"] = False
-            st.markdown("**Follow-up advice:**")
-            st.write(st.session_state["fu_advice"])
-            if not st.session_state.get("fu_advice_played", False):
-                wav2 = synthesize(st.session_state["fu_advice"])
-                if wav2:
-                    st.audio(wav2, format="audio/wav", autoplay=True)
-                    st.session_state["fu_advice_played"] = True
-    
+            st.session_state["conversation"].append({
+                "question": fu_text.strip(),
+                "observation": "",
+                "advice": fu_advice,
+            })
+            st.session_state["fu_question"] = ""
+            st.rerun()
+
+    # Display follow-up advice
+    if st.session_state.get("fu_advice"):
+        st.markdown("**Follow-up advice:**")
+        st.write(st.session_state["fu_advice"])
+        if not st.session_state.get("fu_advice_played", False):
+            wav2 = synthesize(st.session_state["fu_advice"])
+            if wav2:
+                st.audio(wav2, format="audio/wav", autoplay=True)
+                st.session_state["fu_advice_played"] = True
     if st.button("Start New Query"):
         for key in list(st.session_state.keys()):
-            if "advice" in key or "play" in key or "question" in key or "orig" in key:
+            if "advice" in key or "play" in key or "question" in key or "orig" in key or "fu_" in key or "conversation" in key or "observation" in key:
                 del st.session_state[key]
         st.rerun()
 
