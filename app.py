@@ -7,6 +7,7 @@ from datetime import datetime
 
 from config import DB_PATH as APP_DB_PATH
 from memory.db import save_profile, get_profile, add_profile_history, list_profile_history, _now
+from agents.advisor import advise, extract_observation_question
 
 
 st.set_page_config(page_title="AI Counsellor", layout="wide")
@@ -155,8 +156,9 @@ def page_advisor():
     if audio_bytes is not None:
         with st.spinner("Transcribing..."):
             transcript = transcribe_audio(audio_bytes)
-        st.session_state["question"] = transcript
-        st.session_state["observation"] = ""
+        split = extract_observation_question(transcript)
+        st.session_state["observation"] = split.get("observation", "")
+        st.session_state["question"] = split.get("question", transcript)
     
     q = st.session_state.get("question", "")
     c1, c2 = st.columns(2)
