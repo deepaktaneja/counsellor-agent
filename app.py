@@ -76,6 +76,7 @@ def _detect_ext(buf):
     if buf[:2] == b'\xff\xfb': return '.mp3'
     if buf[:4] in (b'ogg ', b'Opus'): return '.ogg'
     if buf[:4] == b'fLaC': return '.flac'
+    if buf[:4] == b'\x1A\x45\xF3\x0A': return '.webm'  # WebM Opus/VP8
     return '.wav'
 
 def transcribe_audio(audio_bytes):
@@ -130,8 +131,8 @@ def synthesize(text, backend=None, voice=None):
             wav_file = tempfile.mktemp(suffix=".wav")
             with open(txt_file, "w") as f:
                 f.write(text)
-
             wav_ok = False
+            # Try specified voice first, then fall back to default system voice
             for v in ([voice] if voice else []) + [None]:
                 try:
                     cmd = ["say", "-o", wav_file, txt_file]
@@ -144,6 +145,8 @@ def synthesize(text, backend=None, voice=None):
                     continue
 
             if not wav_ok:
+                # say command unavailable or voice not installed; TTS is optional
+                st.info("🔊 Audio playback not available on this system; advice text is shown instead")
                 for fp in [txt_file, wav_file]:
                     try:
                         os.unlink(fp)
