@@ -78,10 +78,12 @@ RELEVANT PAST OBSERVATIONS:
 {prev_block}"""
 
 
-def advise(question: str, observation: str = "", prev_question: str = "", prev_advice: str = "") -> str:
+def advise(question: str, observation: str = "", prev_question: str = "", prev_advice: str = "", extra_context: str = "") -> str:
     if not question and not observation:
         return "I didn't catch that. Could you say it again?"
     ctx = build_context(question, observation, prev_question, prev_advice)
+    if extra_context.strip():
+        ctx = ctx + f"\n\nADDITIONAL OBSERVATION CONTEXT (from past observations):\n{extra_context.strip()}\n"
     follow_up_instruction = ""
     if prev_question or prev_advice:
         follow_up_instruction = (
@@ -131,3 +133,117 @@ def summarize_observation(text: str) -> dict:
         return {"summary": data.get("summary", text[:80]), "tags": data.get("tags", [])}
     except Exception:
         return {"summary": text[:80], "tags": []}
+
+
+def summarize_observations(previous_summary, observations_text):
+    system = (
+        "You maintain a concise memory of a parent observations about their autistic son with severe OCD. "
+        "Merge the NEW OBSERVATIONS into the PREVIOUS SUMMARY. "
+        "Keep it under 120 words. Focus on recurring triggers, patterns, what helped, and current concerns. "
+        "Do not invent facts. Return plain text only."
+    )
+    user = (
+        f"PREVIOUS SUMMARY:\n{previous_summary or chr(39)+chr(39)}\n\n"
+        f"NEW OBSERVATIONS:\n{observations_text}\n\n"
+        "Updated summary:"
+    )
+    try:
+        return _ollama_chat(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        ).strip()
+    except Exception:
+        return previous_summary or ""
+
+
+def _dedupe_observations(rows):
+    seen = set()
+    out = []
+    for r in rows:
+        key = (
+            (r.get("observation") or "").strip(),
+            (r.get("question") or "").strip(),
+            (r.get("raw_text") or "").strip(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
+def compact_observations(threshold=20, batch_size=10, keep_recent=10):
+    try:
+        rows = db.list_observations(limit=1000)
+    except Exception:
+        return ""
+    rows = sorted(rows, key=lambda r: r.get("id") or 0)
+    deduped = _dedupe_observations(rows)
+    previous_summary = db.get_latest_observation_summary() or ""
+    if len(deduped) <= threshold:
+        return previous_summary
+    n_compact = max(0, len(deduped) - keep_recent)
+    n_compact = min(n_compact, batch_size)
+    if n_compact <= 0:
+        return previous_summary
+    to_compact = deduped[:n_compact]
+    lines = []
+    for r in to_compact:
+        lines.append(
+            f"- observation: {r.get(chr(39)+"observation"+chr(39), chr(39)+chr(39))} | question: {r.get(chr(39)+"question"+chr(39), chr(39)+chr(39))} | raw: {r.get(chr(39)+"raw_text"+chr(39), chr(39)+chr(39))}"
+        )
+    observations_text = "\n".join(lines)
+    new_summary = summarize_observations(previous_summary, observations_text)
+    if not new_summary:
+        return previous_summary
+    db.save_observation_summary(new_summary, len(to_compact))
+    try:
+        chroma_store.add_text("obs_summary_latest", new_summary, {"type": "observation_summary"})
+    except Exception:
+        pass
+    for r in to_compact:
+        try:
+            db.delete_observation(r.get("id"))
+        except Exception:
+            pass
+        try:
+            chroma_store.delete("obs_" + str(r.get("id")))
+        except Exception:
+            pass
+    return new_summary
+
+
+def summarize_and_clear_observations():
+    try:
+        rows = db.list_observations(limit=10000)
+    except Exception:
+        return "Could not load observations."
+    rows = sorted(rows, key=lambda r: r.get("id") or 0)
+    deduped = _dedupe_observations(rows)
+    if not deduped:
+        return db.get_latest_observation_summary() or "No observations to summarize."
+    previous_summary = db.get_latest_observation_summary() or ""
+    lines = []
+    for r in deduped:
+        obs = r.get("observation") or ""
+        q = r.get("question") or ""
+        raw = r.get("raw_text") or ""
+        lines.append("- observation: " + obs + " | question: " + q + " | raw: " + raw)
+    observations_text = "\n".join(lines)
+    new_summary = summarize_observations(previous_summary, observations_text)
+    if not new_summary:
+        return previous_summary or "Summarization failed."
+    db.save_observation_summary(new_summary, len(deduped))
+    try:
+        chroma_store.add_text("obs_summary_latest", new_summary, {"type": "observation_summary"})
+    except Exception:
+        pass
+    for r in deduped:
+        try:
+            db.delete_observation(r.get("id"))
+        except Exception:
+            pass
+        try:
+            chroma_store.delete("obs_" + str(r.get("id")))
+        except Exception:
+            pass
+    return new_summary

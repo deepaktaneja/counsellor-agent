@@ -66,6 +66,12 @@ def init_db():
         mode TEXT,
         transcript TEXT
     );
+    CREATE TABLE IF NOT EXISTS observation_summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        obs_count INTEGER DEFAULT 0
+    );
     """)
     c.commit()
     c.close()
@@ -336,3 +342,26 @@ def list_findings(category=None):
 
 init_db()
 
+
+def save_observation_summary(summary, obs_count=0):
+    c = _conn()
+    cur = c.cursor()
+    cur.execute("INSERT INTO observation_summaries (created_at, summary, obs_count) VALUES (?,?,?)", (_now(), summary, obs_count))
+    c.commit()
+    rid = cur.lastrowid
+    c.close()
+    return rid
+
+
+def get_latest_observation_summary():
+    c = _conn()
+    row = c.execute("SELECT summary FROM observation_summaries ORDER BY id DESC LIMIT 1").fetchone()
+    c.close()
+    return (row["summary"] if row else "") or ""
+
+
+def list_observation_summaries(limit=10):
+    c = _conn()
+    rows = c.execute("SELECT * FROM observation_summaries ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    c.close()
+    return [dict(r) for r in rows]

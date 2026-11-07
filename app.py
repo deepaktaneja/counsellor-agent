@@ -7,8 +7,8 @@ from pathlib import Path
 from datetime import datetime
 
 from config import DB_PATH as APP_DB_PATH, WHISPER_INITIAL_PROMPT
-from memory.db import save_profile, get_profile, add_profile_history, list_profile_history, _now
-from agents.advisor import advise, extract_observation_question
+from memory.db import save_profile, get_profile, add_profile_history, list_profile_history, _now, get_latest_observation_summary
+from agents.advisor import advise, extract_observation_question, compact_observations, summarize_and_clear_observations
 
 
 st.set_page_config(page_title="AI Counsellor", layout="wide")
@@ -22,10 +22,10 @@ if env_path.exists():
                 k, v = line.split("=", 1)
                 os.environ[k.strip()] = v.strip()
 
-DB_PATH = Path("memory/counsellor.db")
 
 def get_db():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(APP_DB_PATH))
+    conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
@@ -56,6 +56,35 @@ def save_document(filename, doc_type, summary, full_text=""):
     c.execute("INSERT INTO documents (filename, uploaded_at, doc_type, summary, full_text) VALUES (?,?,?,?,?)",
               (filename, datetime.now().isoformat(), doc_type, summary, full_text))
     conn.commit(); conn.close()
+
+
+def is_duplicate_observation(observation: str, question: str) -> bool:
+    """Best-effort duplicate check against recent observations."""
+    try:
+        from memory.db import list_observations
+        for row in list_observations(limit=20):
+            if (row.get("observation") or "") == (observation or "") and (row.get("question") or "") == (question or ""):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def save_turn_to_db(observation: str, question: str, transcript: str) -> bool:
+    """Save an observation turn to the same DB that page_observations reads from."""
+    if not (observation or question):
+        return False
+    if is_duplicate_observation(observation or "", question or ""):
+        return False
+    from memory.db import save_observation
+    save_observation(
+        raw_text=transcript or "",
+        observation=observation or "",
+        question=question or "",
+        summary=(observation or question or transcript or "")[:200],
+        tags=["advisor"],
+    )
+    return True
 
 def save_medication(name, dose, frequency, prescriber, start_date, end_date, status="current", notes=""):
     conn = get_db(); c = conn.cursor()
@@ -186,7 +215,48 @@ def page_advisor():
         if profile.get("age"): st.caption(f"Age: {profile.get('age')}")
         if profile.get("ocd_themes"): st.caption(f"OCD themes: {profile.get('ocd_themes')[:80]}...")
         if profile.get("deescalation"): st.caption(f"Calms: {profile.get('deescalation')[:60]}...")
+
+        st.markdown("---")
+        st.header("Observation Summary")
+        _os = get_latest_observation_summary()
+        if _os:
+            st.caption(_os)
+        else:
+            st.caption("None yet.")
     
+    chat_mode = st.toggle("Chat mode (off = Recording)", value=False, key="advisor_chat_mode")
+
+    if chat_mode:
+        if "chat_messages" not in st.session_state:
+            st.session_state["chat_messages"] = []
+
+        for msg in st.session_state["chat_messages"]:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
+
+        prompt = st.chat_input("Type your question…")
+        if prompt and prompt.strip():
+            user_text = prompt.strip()
+            st.session_state["chat_messages"].append({"role": "user", "content": user_text})
+            with st.chat_message("user"):
+                st.write(user_text)
+            with st.spinner("Generating advice..."):
+                _obs_summary = compact_observations()
+                st.session_state["last_obs_summary"] = _obs_summary
+                advice = advise(question=user_text, extra_context=_obs_summary)
+                save_turn_to_db(observation="", question=user_text, transcript=user_text)
+            st.session_state["chat_messages"].append({"role": "assistant", "content": advice})
+            with st.chat_message("assistant"):
+                st.write(advice)
+                wav = synthesize(advice)
+                if wav:
+                    st.audio(wav, format="audio/wav", autoplay=True)
+
+        if st.button("Clear chat", key="clear_chat"):
+            st.session_state["chat_messages"] = []
+            st.rerun()
+        return
+
     st.markdown("**Press & hold to speak**")
     audio_bytes = st.audio_input("🎤", label_visibility="collapsed")
     
@@ -210,7 +280,14 @@ def page_advisor():
     
     if st.button("🔍 Get Advice") and (obs.strip() or quest.strip()):
         with st.spinner("Generating advice..."):
-            advice = advise(observation=obs.strip(), question=quest.strip())
+            _obs_summary = compact_observations()
+            st.session_state["last_obs_summary"] = _obs_summary
+            advice = advise(observation=obs.strip(), question=quest.strip(), extra_context=_obs_summary)
+            save_turn_to_db(
+                observation=obs.strip(),
+                question=quest.strip(),
+                transcript=obs.strip() + " " + quest.strip(),
+            )
         st.session_state["advice"] = advice
         st.session_state["advice_played"] = False
         st.session_state["orig_advice"] = advice
@@ -228,6 +305,10 @@ def page_advisor():
     if st.session_state.get("advice"):
         st.markdown("### Advice")
         st.write(st.session_state["advice"])
+        _ctx = st.session_state.get("last_obs_summary")
+        if _ctx:
+            with st.expander("Additional context sent to LLM (observation summary)"):
+                st.write(_ctx)
         if not st.session_state.get("advice_played", False):
             wav = synthesize(st.session_state["advice"])
             if wav:
@@ -257,7 +338,9 @@ def page_advisor():
                 conv = st.session_state.get("conversation", [])
                 prev_q = conv[-1]["question"] if conv else ""
                 prev_a = conv[-1]["advice"] if conv else ""
-                fu_advice = advise(observation="", question=fu_text.strip(), prev_question=prev_q, prev_advice=prev_a)
+                _obs_summary = compact_observations()
+                st.session_state["last_obs_summary"] = _obs_summary
+                fu_advice = advise(observation="", question=fu_text.strip(), prev_question=prev_q, prev_advice=prev_a, extra_context=_obs_summary)
             st.session_state["fu_advice"] = fu_advice
             st.session_state["fu_advice_played"] = False
             st.session_state["conversation"].append({
@@ -378,6 +461,12 @@ def page_records():
 
 def page_observations():
     st.title("📝 Observations History")
+    _summary = get_latest_observation_summary()
+    with st.expander("🧠 Latest observation summary", expanded=bool(_summary)):
+        if _summary:
+            st.write(_summary)
+        else:
+            st.info("No observation summary yet.")
     obs = load_observations()
     if obs:
         for o in obs:
@@ -386,6 +475,15 @@ def page_observations():
                 st.write(f"Full text: {o.get('raw_text','')[:200]}")
     else:
         st.info("No observations yet.")
+
+    if st.button("🧠 Summarize & clear observations", key="summarize_clear_obs"):
+        with st.spinner("Summarizing observations..."):
+            summary = summarize_and_clear_observations()
+        st.success("Observations summarized and cleared.")
+        if summary:
+            st.markdown("**Summary saved:**")
+            st.write(summary)
+        st.rerun()
 
 def main():
     init_db()

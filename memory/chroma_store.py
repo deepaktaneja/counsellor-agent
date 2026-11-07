@@ -42,3 +42,17 @@ def count():
         return _collection_instance().count()
     except Exception:
         return 0
+
+def delete(doc_id):
+    try:
+        _collection_instance().delete(ids=[doc_id])
+    except Exception:
+        pass
+
+def delete_many(doc_ids):
+    if not doc_ids:
+        return
+    try:
+        _collection_instance().delete(ids=list(doc_ids))
+    except Exception:
+        pass
