@@ -68,6 +68,9 @@ def _category_from_type(doc_type):
     if dt == "situational_photo":
         return "other"
     return "other"
+
+
+def _store_structured(doc_id, data):
     for d in (data.get("diagnoses") or []):
         db.save_diagnosis(condition=d.get("condition", ""), diagnosed_by=d.get("diagnosed_by", ""),
                           date=d.get("date", ""), notes=d.get("notes", ""), source_doc_id=doc_id)
