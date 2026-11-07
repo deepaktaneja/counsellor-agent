@@ -6,7 +6,7 @@ from ingestion import pdf_parser, image_parser, extractor
 from memory import db, chroma_store
 
 
-def ingest_pdf(path: str, filename: str) -> dict:
+def ingest_pdf(path: str, filename: str, doc_type_override: str = None, category_override: str = None) -> dict:
     text = pdf_parser.extract_pdf_text(path)
     # copy file
     dest = FILES_DIR / filename
@@ -15,15 +15,17 @@ def ingest_pdf(path: str, filename: str) -> dict:
     except Exception:
         dest = Path(path)
     data = extractor.extract_structured(text)
-    doc_id = db.save_document(filename=filename, doc_type=data.get("doc_type", "other"),
+    doc_type = doc_type_override or data.get("doc_type", "other")
+    category = category_override or _category_from_type(doc_type)
+    doc_id = db.save_document(filename=filename, doc_type=doc_type, category=category,
                               summary=data.get("summary", ""), full_text=text,
                               file_path=str(dest))
     _store_structured(doc_id, data)
-    chroma_store.add_text(f"doc_{doc_id}", text[:4000], {"type": "document", "doc_id": doc_id})
-    return {"doc_id": doc_id, "data": data, "text": text}
+    chroma_store.add_text(f"doc_{doc_id}", text[:4000], {"type": "document", "doc_id": doc_id, "doc_type": doc_type, "category": category})
+    return {"doc_id": doc_id, "data": data, "text": text, "doc_type": doc_type, "category": category}
 
 
-def ingest_image(path: str, filename: str) -> dict:
+def ingest_image(path: str, filename: str, doc_type_override: str = None, category_override: str = None) -> dict:
     # optional gemini
     from config import USE_GEMINI_VISION, GEMINI_API_KEY
     if USE_GEMINI_VISION and GEMINI_API_KEY:
@@ -39,21 +41,33 @@ def ingest_image(path: str, filename: str) -> dict:
     except Exception:
         dest = Path(path)
     data = extractor.extract_structured(text)
-    doc_id = db.save_document(filename=filename, doc_type=data.get("doc_type", "other"),
+    doc_type = doc_type_override or data.get("doc_type", "other")
+    category = category_override or _category_from_type(doc_type)
+    doc_id = db.save_document(filename=filename, doc_type=doc_type, category=category,
                               summary=data.get("summary", ""), full_text=text,
                               file_path=str(dest))
     _store_structured(doc_id, data)
-    chroma_store.add_text(f"doc_{doc_id}", text[:4000], {"type": "document", "doc_id": doc_id})
+    chroma_store.add_text(f"doc_{doc_id}", text[:4000], {"type": "document", "doc_id": doc_id, "doc_type": doc_type, "category": category})
     # if situational photo, also save as observation
     if data.get("doc_type") == "situational_photo":
         obs_text = data.get("summary") or text[:200]
         oid = db.save_observation(raw_text=text, observation=obs_text, summary=obs_text,
                                   tags=["photo", "situational"])
         chroma_store.add_text(f"obs_{oid}", obs_text, {"type": "observation", "obs_id": oid})
-    return {"doc_id": doc_id, "data": data, "text": text}
+    return {"doc_id": doc_id, "data": data, "text": text, "doc_type": doc_type, "category": category}
 
 
-def _store_structured(doc_id, data):
+def _category_from_type(doc_type):
+    dt = (doc_type or "").lower()
+    if dt in ("medication_label", "prescription"):
+        return "medication"
+    if dt in ("assessment", "psych_report", "psychological_assessment", "medical_report"):
+        return "assessment"
+    if dt in ("therapy_note", "therapy_session", "therapy_report", "handwritten_note"):
+        return "therapy"
+    if dt == "situational_photo":
+        return "other"
+    return "other"
     for d in (data.get("diagnoses") or []):
         db.save_diagnosis(condition=d.get("condition", ""), diagnosed_by=d.get("diagnosed_by", ""),
                           date=d.get("date", ""), notes=d.get("notes", ""), source_doc_id=doc_id)

@@ -30,6 +30,7 @@ def init_db():
         filename TEXT NOT NULL,
         uploaded_at TEXT NOT NULL,
         doc_type TEXT,
+        category TEXT,
         summary TEXT,
         full_text TEXT,
         file_path TEXT
@@ -72,8 +73,20 @@ def init_db():
         summary TEXT NOT NULL,
         obs_count INTEGER DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS psychology_summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        doc_count INTEGER DEFAULT 0
+    );
     """)
     c.commit()
+    try:
+        c.execute("ALTER TABLE documents ADD COLUMN category TEXT")
+        c.commit()
+    except Exception:
+        pass
+
     c.close()
 
 
@@ -109,12 +122,12 @@ def delete_observation(oid):
     c.close()
 
 
-def save_document(filename, doc_type="", summary="", full_text="", file_path=""):
+def save_document(filename, doc_type="", summary="", full_text="", file_path="", category=""):
     c = _conn()
     cur = c.cursor()
     cur.execute(
-        "INSERT INTO documents (filename, uploaded_at, doc_type, summary, full_text, file_path) VALUES (?,?,?,?,?,?)",
-        (filename, _now(), doc_type, summary, full_text, file_path),
+        "INSERT INTO documents (filename, uploaded_at, doc_type, category, summary, full_text, file_path) VALUES (?,?,?,?,?,?,?)",
+        (filename, _now(), doc_type, category, summary, full_text, file_path),
     )
     c.commit()
     rid = cur.lastrowid
@@ -122,11 +135,54 @@ def save_document(filename, doc_type="", summary="", full_text="", file_path="")
     return rid
 
 
-def list_documents():
+def list_documents(doc_type=None, category=None):
     c = _conn()
-    rows = c.execute("SELECT * FROM documents ORDER BY id DESC").fetchall()
+    clauses = []
+    params = []
+    if doc_type:
+        clauses.append("doc_type=?")
+        params.append(doc_type)
+    if category:
+        clauses.append("category=?")
+        params.append(category)
+    sql = "SELECT * FROM documents"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY id DESC"
+    rows = c.execute(sql, tuple(params)).fetchall()
     c.close()
     return [dict(r) for r in rows]
+
+
+def list_documents_by_types(types):
+    if not types:
+        return []
+    placeholders = ",".join("?" for _ in types)
+    c = _conn()
+    rows = c.execute(f"SELECT * FROM documents WHERE doc_type IN ({placeholders}) ORDER BY id DESC", tuple(types)).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+
+def update_document_type(did, doc_type):
+    c = _conn()
+    c.execute("UPDATE documents SET doc_type=? WHERE id=?", (doc_type, did))
+    c.commit()
+    c.close()
+
+
+def update_document_category(did, category):
+    c = _conn()
+    c.execute("UPDATE documents SET category=? WHERE id=?", (category, did))
+    c.commit()
+    c.close()
+
+
+def delete_document(did):
+    c = _conn()
+    c.execute("DELETE FROM documents WHERE id=?", (did,))
+    c.commit()
+    c.close()
 
 
 def get_document(did):
@@ -156,6 +212,34 @@ def list_medications(status=None):
         rows = c.execute("SELECT * FROM medications ORDER BY id DESC").fetchall()
     c.close()
     return [dict(r) for r in rows]
+
+
+def update_medication(mid, name=None, dose=None, frequency=None, prescriber=None,
+                      start_date=None, end_date=None, status=None, notes=None):
+    c = _conn()
+    row = c.execute("SELECT * FROM medications WHERE id=?", (mid,)).fetchone()
+    if not row:
+        c.close()
+        return False
+    cur = c.cursor()
+    cur.execute(
+        """UPDATE medications SET
+           name=COALESCE(?,name), dose=COALESCE(?,dose), frequency=COALESCE(?,frequency),
+           prescriber=COALESCE(?,prescriber), start_date=COALESCE(?,start_date),
+           end_date=COALESCE(?,end_date), status=COALESCE(?,status), notes=COALESCE(?,notes)
+           WHERE id=?""",
+        (name, dose, frequency, prescriber, start_date, end_date, status, notes, mid),
+    )
+    c.commit()
+    c.close()
+    return True
+
+
+def delete_medication(mid):
+    c = _conn()
+    c.execute("DELETE FROM medications WHERE id=?", (mid,))
+    c.commit()
+    c.close()
 
 
 def current_medications_text():
@@ -192,6 +276,54 @@ def diagnoses_text():
     if not dx:
         return "No diagnoses recorded."
     return "; ".join(d["condition"] for d in dx)
+
+
+def _docs_text_for_types(types, label, category=None):
+    docs = []
+    if category:
+        docs = list_documents(category=category)
+    legacy = list_documents_by_types(types)
+    # merge unique
+    seen = {d.get("id") for d in docs}
+    for d in legacy:
+        if d.get("id") not in seen:
+            docs.append(d)
+            seen.add(d.get("id"))
+    if not docs:
+        return f"No {label} recorded."
+    parts = []
+    for d in docs:
+        s = (d.get("summary") or "").strip()
+        if s:
+            parts.append(f"- {d.get('filename','doc')} ({d.get('doc_type','')}): {s}")
+    # also include findings linked to these docs
+    try:
+        all_findings = list_findings()
+        doc_ids = {d.get("id") for d in docs}
+        linked = [f for f in all_findings if f.get("source_doc_id") in doc_ids]
+        if linked:
+            parts.append("Findings:")
+            for f in linked:
+                parts.append(f"  - [{f.get('category','other')}] {f.get('content','')}")
+    except Exception:
+        pass
+    return "\n".join(parts) if parts else f"No {label} recorded."
+
+
+def assessments_text():
+    return _docs_text_for_types(["assessment", "psych_report", "psychological_assessment"], "assessments", category="assessment")
+
+
+def therapy_text():
+    return _docs_text_for_types(["therapy_note", "therapy_session", "therapy_report"], "therapy notes", category="therapy")
+
+
+def psychology_text():
+    a = assessments_text()
+    t = therapy_text()
+    if a.startswith("No assessments") and t.startswith("No therapy"):
+        return "No psychology assessments or therapy notes recorded."
+    return f"ASSESSMENTS:\n{a}\n\nTHERAPY:\n{t}"
 
 
 def save_finding(category, content, source_doc_id=None):
@@ -363,5 +495,29 @@ def get_latest_observation_summary():
 def list_observation_summaries(limit=10):
     c = _conn()
     rows = c.execute("SELECT * FROM observation_summaries ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+
+def save_psychology_summary(summary, doc_count=0):
+    c = _conn()
+    cur = c.cursor()
+    cur.execute("INSERT INTO psychology_summaries (created_at, summary, doc_count) VALUES (?,?,?)", (_now(), summary, doc_count))
+    c.commit()
+    rid = cur.lastrowid
+    c.close()
+    return rid
+
+
+def get_latest_psychology_summary():
+    c = _conn()
+    row = c.execute("SELECT summary FROM psychology_summaries ORDER BY id DESC LIMIT 1").fetchone()
+    c.close()
+    return (row["summary"] if row else "") or ""
+
+
+def list_psychology_summaries(limit=10):
+    c = _conn()
+    rows = c.execute("SELECT * FROM psychology_summaries ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     c.close()
     return [dict(r) for r in rows]

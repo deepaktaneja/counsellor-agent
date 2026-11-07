@@ -54,6 +54,8 @@ def build_context(question: str, observation: str = "", prev_question: str = "",
     structured = db.profile_text()
     meds = db.current_medications_text()
     dx = db.diagnoses_text()
+    psych = db.psychology_text()
+    psych_summary = db.get_latest_psychology_summary()
     # RAG retrieval
     query_text = " ".join([question, observation]).strip()
     hits = chroma_store.query(query_text, k=5) if query_text else []
@@ -72,6 +74,10 @@ SON PROFILE (free-form notes):
 
 CURRENT MEDICATIONS: {meds}
 DIAGNOSES: {dx}
+
+PSYCHOLOGY ASSESSMENTS & THERAPY:
+{psych}
+CACHED PSYCHOLOGY SUMMARY: {psych_summary or "None yet."}
 
 RELEVANT PAST OBSERVATIONS:
 {past_block}

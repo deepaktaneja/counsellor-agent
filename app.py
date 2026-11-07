@@ -7,8 +7,10 @@ from pathlib import Path
 from datetime import datetime
 
 from config import DB_PATH as APP_DB_PATH, WHISPER_INITIAL_PROMPT
-from memory.db import save_profile, get_profile, add_profile_history, list_profile_history, _now, get_latest_observation_summary
+from memory.db import save_profile, get_profile, add_profile_history, list_profile_history, _now, get_latest_observation_summary, get_latest_psychology_summary, save_psychology_summary, psychology_text, assessments_text, therapy_text
 from agents.advisor import advise, extract_observation_question, compact_observations, summarize_and_clear_observations
+from ingestion.pipeline import ingest_pdf, ingest_image
+import tempfile, os as _os
 
 
 st.set_page_config(page_title="AI Counsellor", layout="wide")
@@ -33,7 +35,7 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
     c.execute("CREATE TABLE IF NOT EXISTS observations (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, raw_text TEXT, summary TEXT, tags TEXT)")
-    c.execute("CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, uploaded_at TEXT, doc_type TEXT, summary TEXT, full_text TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, uploaded_at TEXT, doc_type TEXT, category TEXT, summary TEXT, full_text TEXT)")
     conn.commit()
     conn.close()
 
@@ -428,36 +430,116 @@ def page_profile():
     else:
         st.info("No profile history yet.")
 
-def page_records():
-    st.title("📄 Medical Records")
-    profile = get_profile() or {}
-    
+def page_medications():
+    st.title("💊 Medications")
+    from memory.db import (list_medications, save_medication, update_medication,
+                           delete_medication, list_documents, update_document_category)
+
     with st.sidebar:
         st.header("Data")
         c1, c2 = st.columns(2)
-        c1.metric("PDF Uploads", len(load_documents()))
-        c2.metric("Observations", len(load_observations()))
-    
-    st.markdown("### Upload PDFs / Images")
-    uploaded = st.file_uploader("Upload PDF or image", type=["pdf", "jpg", "png", "jpeg"], key="upload_records")
-    if uploaded:
-        with st.spinner("Ingesting..."):
-            ingest_file(uploaded)
-        st.success("✅ Ingested!")
-        st.rerun()
-    
-    st.markdown("### All Medical Records")
-    docs = load_documents()
-    if docs:
-        for doc in docs:
-            with st.expander(doc.get("filename", "Unknown")):
-                st.caption(f"Uploaded: {doc.get('uploaded_at','')} | Type: {doc.get('doc_type','')}")
-                st.caption(doc.get("summary", "")[:200])
+        c1.metric("Medications", len(list_medications()))
+        c2.metric("Med Docs", len(list_documents(category="medication")))
+
+    _upload_widget("meds")
+
+    st.markdown("### Current / All Medications")
+    meds = list_medications()
+    if meds:
+        for m in meds:
+            with st.expander(f"{m.get('name','')} — {m.get('dose','')} ({m.get('status','')})"):
+                st.write(f"**Frequency:** {m.get('frequency','')}")
+                st.write(f"**Prescriber:** {m.get('prescriber','')}")
+                st.write(f"**Start:** {m.get('start_date','')}  **End:** {m.get('end_date','')}")
+                st.write(f"**Notes:** {m.get('notes','')}")
+                c1, c2 = st.columns(2)
+                if c1.button("Mark past", key=f"past_{m['id']}"):
+                    update_medication(m["id"], status="past")
+                    st.rerun()
+                if c2.button("Delete", key=f"delmed_{m['id']}"):
+                    delete_medication(m["id"])
+                    st.rerun()
     else:
-        st.info("No medical records yet.")
-    
-    if st.button("Export All Records"):
-        st.download_button("Download CSV", "records.csv")
+        st.info("No medications recorded yet.")
+
+    with st.expander("➕ Add medication manually"):
+        with st.form("add_med_form"):
+            name = st.text_input("Name")
+            dose = st.text_input("Dose")
+            freq = st.text_input("Frequency")
+            presc = st.text_input("Prescriber")
+            start = st.text_input("Start date")
+            end = st.text_input("End date")
+            status = st.selectbox("Status", ["current", "past"])
+            notes = st.text_area("Notes")
+            if st.form_submit_button("Save"):
+                if name.strip():
+                    save_medication(name=name.strip(), dose=dose, frequency=freq,
+                                    prescriber=presc, start_date=start, end_date=end,
+                                    status=status, notes=notes)
+                    st.success("Saved")
+                    st.rerun()
+
+    st.markdown("### Medication Documents")
+    docs = list_documents(category="medication")
+    if docs:
+        for d in docs:
+            with st.expander(f"{d.get('filename','Unknown')} ({d.get('doc_type','')})"):
+                st.caption(f"Uploaded: {d.get('uploaded_at','')}")
+                st.write(d.get("summary", "")[:500])
+                if st.session_state.get(f"recls_{d['id']}"):
+                    newcat = st.selectbox("New category", ["medication", "assessment", "therapy", "other"],
+                                          key=f"nc_{d['id']}")
+                    if st.button("Apply", key=f"app_{d['id']}"):
+                        update_document_category(d["id"], newcat)
+                        st.rerun()
+                else:
+                    if st.button("Reclassify", key=f"reclsbtn_{d['id']}"):
+                        st.session_state[f"recls_{d['id']}"] = True
+                        st.rerun()
+    else:
+        st.info("No medication documents yet.")
+
+def _handle_upload(uploaded, category_override=None):
+    suffix = Path(uploaded.name).suffix.lower()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded.getbuffer())
+        tmp_path = tmp.name
+    try:
+        if suffix == ".pdf":
+            return ingest_pdf(tmp_path, uploaded.name, category_override=category_override)
+        else:
+            return ingest_image(tmp_path, uploaded.name, category_override=category_override)
+    finally:
+        try:
+            _os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def _upload_widget(key_prefix):
+    st.markdown("### Upload PDFs / Images")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        uploaded = st.file_uploader("Choose file", type=["pdf", "jpg", "png", "jpeg"], key=f"up_{key_prefix}")
+    with col2:
+        choice = st.selectbox(
+            "Classify as",
+            ["Auto-detect", "Medication", "Assessment", "Therapy", "Other"],
+            key=f"cls_{key_prefix}",
+        )
+    if uploaded is not None:
+        cat_map = {"Auto-detect": None, "Medication": "medication",
+                   "Assessment": "assessment", "Therapy": "therapy", "Other": "other"}
+        co = cat_map.get(choice)
+        if st.button("Ingest", key=f"ing_{key_prefix}"):
+            with st.spinner("Ingesting..."):
+                res = _handle_upload(uploaded, category_override=co)
+            st.success(f"Ingested as '{res.get('category','')}' (doc_type: {res.get('doc_type','')})")
+            st.caption((res.get("data", {}) or {}).get("summary", "")[:300])
+            st.rerun()
+
+
 
 def page_observations():
     st.title("📝 Observations History")
@@ -485,14 +567,80 @@ def page_observations():
             st.write(summary)
         st.rerun()
 
+def page_psychology():
+    st.title("🧠 Psychology & Therapy")
+    from memory.db import (list_documents, update_document_category,
+                           get_latest_psychology_summary, save_psychology_summary,
+                           psychology_text)
+
+    with st.sidebar:
+        st.header("Data")
+        c1, c2 = st.columns(2)
+        c1.metric("Assessments", len(list_documents(category="assessment")))
+        c2.metric("Therapy", len(list_documents(category="therapy")))
+
+    _upload_widget("psych")
+
+    tabA, tabT = st.tabs(["Assessments", "Therapy"])
+    with tabA:
+        docs = list_documents(category="assessment")
+        if docs:
+            for d in docs:
+                with st.expander(f"{d.get('filename','Unknown')} ({d.get('doc_type','')})"):
+                    st.caption(f"Uploaded: {d.get('uploaded_at','')}")
+                    st.write(d.get("summary", "") or "")
+                    st.text((d.get("full_text", "") or "")[:1500])
+        else:
+            st.info("No assessment documents yet.")
+    with tabT:
+        docs = list_documents(category="therapy")
+        if docs:
+            for d in docs:
+                with st.expander(f"{d.get('filename','Unknown')} ({d.get('doc_type','')})"):
+                    st.caption(f"Uploaded: {d.get('uploaded_at','')}")
+                    st.write(d.get("summary", "") or "")
+                    st.text((d.get("full_text", "") or "")[:1500])
+        else:
+            st.info("No therapy documents yet.")
+
+    st.markdown("---")
+    st.markdown("### Consolidated Psychology Summary")
+    _ps = get_latest_psychology_summary()
+    if _ps:
+        st.write(_ps)
+    else:
+        st.caption("None yet.")
+    if st.button("🧠 Generate / refresh summary"):
+        from agents.advisor import _ollama_chat
+        ctx = psychology_text()
+        system = ("You maintain a concise clinical summary of a young autistic adult with severe OCD "
+                  "based on psychology assessments and therapy notes. Keep under 150 words. "
+                  "Focus on diagnoses, current therapy approach, goals, progress, concerns. "
+                  "Do not invent facts. Return plain text only.")
+        user = f"SOURCE MATERIAL:\n{ctx}\n\nConsolidated summary:"
+        try:
+            with st.spinner("Summarizing..."):
+                new = _ollama_chat([{"role": "system", "content": system},
+                                    {"role": "user", "content": user}]).strip()
+            if new:
+                save_psychology_summary(new, len(list_documents(category="assessment")) + len(list_documents(category="therapy")))
+                st.success("Saved.")
+                st.write(new)
+                st.rerun()
+        except Exception as e:
+            st.error(f"Failed: {e}")
+
+
+
 def main():
     init_db()
     with st.sidebar:
         st.title("🤖 AI Counsellor")
-        page = st.radio("Go to", ["Advisor", "Profile", "Records", "Observations"], index=0)
+        page = st.radio("Go to", ["Advisor", "Medications", "Psychology & Therapy", "Profile", "Observations"], index=0)
     if page == "Advisor": page_advisor()
+    elif page == "Medications": page_medications()
+    elif page == "Psychology & Therapy": page_psychology()
     elif page == "Profile": page_profile()
-    elif page == "Records": page_records()
     elif page == "Observations": page_observations()
 
 if __name__ == "__main__": main()

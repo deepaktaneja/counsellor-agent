@@ -14,7 +14,8 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "doc_type": {"type": "string", "enum": ["medical_report", "prescription", "handwritten_note",
-                                                "situational_photo", "medication_label", "other"]},
+                                                "situational_photo", "medication_label", "assessment",
+                                                "therapy_note", "other"]},
         "summary": {"type": "string"},
         "diagnoses": {"type": "array", "items": {"type": "object", "properties": {
             "condition": {"type": "string"}, "diagnosed_by": {"type": "string"}, "date": {"type": "string"}, "notes": {"type": "string"}
@@ -40,7 +41,7 @@ def extract_structured(text: str) -> dict:
     system = (
         "You extract structured medical/psychological information about an autistic young adult "
         "with severe OCD from a document. Return ONLY JSON matching the schema. "
-        "doc_type: medical_report/prescription/handwritten_note/situational_photo/medication_label/other. "
+        "doc_type: medical_report/prescription/handwritten_note/situational_photo/medication_label/assessment/therapy_note/other. "
         "medication status: 'current' or 'past'. findings categories: trigger, recommendation, observation, other. "
         "For 'diagnoses', extract any condition or disorder explicitly stated as affecting the patient "
         "(e.g., if text says 'autism' or 'OCD', include them). Do not invent conditions."
