@@ -289,7 +289,7 @@ def diagnoses_text():
     return "; ".join(d["condition"] for d in dx)
 
 
-def _docs_text_for_types(types, label, category=None):
+def _docs_text_for_types(types, label, category=None, max_chars=15000):
     docs = []
     if category:
         docs = list_documents(category=category)
@@ -303,10 +303,27 @@ def _docs_text_for_types(types, label, category=None):
     if not docs:
         return f"No {label} recorded."
     parts = []
+    total = 0
     for d in docs:
         s = (d.get("summary") or "").strip()
         if s:
-            parts.append(f"- {d.get('filename','doc')} ({d.get('doc_type','')}): {s}")
+            line = f"- {d.get('filename','doc')} ({d.get('doc_type','')}): {s}"
+            parts.append(line)
+            total += len(line)
+        full_text = (d.get("full_text") or "").strip()
+        if full_text:
+            # include full page-tagged text so the LLM reads every page
+            header = f"\nFULL TEXT for {d.get('filename','doc')} ({d.get('doc_type','')}):\n"
+            block = header + full_text
+            if total + len(block) > max_chars:
+                remaining = max_chars - total
+                if remaining > 200:
+                    parts.append(block[:remaining] + "\n...[truncated]...")
+                break
+            parts.append(block)
+            total += len(block)
+        if total >= max_chars:
+            break
     # also include findings linked to these docs
     try:
         all_findings = list_findings()
