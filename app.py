@@ -497,6 +497,30 @@ def page_medications():
                     if st.button("Reclassify", key=f"reclsbtn_{d['id']}"):
                         st.session_state[f"recls_{d['id']}"] = True
                         st.rerun()
+                # delete button for medication document
+                from memory.db import delete_document_cascade
+                from memory import chroma_store
+                did = d.get("id")
+                cdel_key = f"confirm_delmed_{did}"
+                if st.button("🗑️ Delete document", key=f"btn_delmed_{did}"):
+                    st.session_state[cdel_key] = True
+                    st.rerun()
+                if st.session_state.get(cdel_key):
+                    st.warning("Delete this medication document? Linked medications will also be removed.")
+                    cc1, cc2 = st.columns([1, 3])
+                    if cc1.button("Yes, delete", key=f"yes_delmed_{did}"):
+                        try:
+                            chroma_store.delete("doc_%s" % did)
+                            chroma_store.delete_by_parent(did)
+                        except Exception:
+                            pass
+                        delete_document_cascade(did)
+                        st.session_state.pop(cdel_key, None)
+                        st.success("Deleted.")
+                        st.rerun()
+                    if cc2.button("Cancel", key=f"no_delmed_{did}"):
+                        st.session_state.pop(cdel_key, None)
+                        st.rerun()
     else:
         st.info("No medication documents yet.")
 
@@ -572,6 +596,73 @@ def page_observations():
             st.write(summary)
         st.rerun()
 
+def _render_doc_card(d, category):
+    from memory import chroma_store
+    from memory.db import delete_document_cascade, list_documents
+    did = d.get("id")
+    fname = d.get("filename", "Unknown")
+    doc_type = d.get("doc_type", "")
+    uploaded = d.get("uploaded_at", "")
+    summary = d.get("summary", "") or ""
+    full_text = d.get("full_text", "") or ""
+
+    # count chroma chunks for this document (page-level chunks)
+    try:
+        _res = chroma_store._collection_instance().get(where={"parent_id": did})
+        chunk_ids = _res.get("ids", [])
+    except Exception:
+        chunk_ids = []
+    # count distinct pages from metadata
+    try:
+        _metas = chroma_store._collection_instance().get(where={"parent_id": did}).get("metadatas", [])
+        pages = sorted({m.get("page") for m in _metas if m and m.get("page")})
+    except Exception:
+        pages = []
+    page_label = "pages %s" % (", ".join(str(p) for p in pages) if pages else "0")
+
+    with st.expander(f"📄 {fname} ({doc_type}) — {page_label}", expanded=False):
+        st.caption(f"Uploaded: {uploaded}  |  ID: {did}  |  Chroma chunks: {len(chunk_ids)}")
+        st.markdown("**Summary:**")
+        st.write(summary or "_No summary extracted._")
+        # per-page text
+        st.markdown("**Pages:**")
+        page_marker = "--- Page "
+        parts = full_text.split(page_marker)
+        if len(parts) > 1:
+            for part in parts[1:]:
+                pnum = part.split(" of ")[0].strip()
+                ptext = part.split("\n", 1)[1] if "\n" in part else part
+                st.markdown(f"**Page {pnum}:**")
+                st.text(ptext[:1200])
+        elif full_text.strip():
+            st.text(full_text[:1200])
+        else:
+            st.caption("No full text stored.")
+
+        # delete action
+        c1, c2 = st.columns([1, 4])
+        confirm_key = f"confirm_delete_{did}"
+        if c1.button("🗑️ Delete document", key=f"btn_delete_{did}"):
+            st.session_state[confirm_key] = True
+            st.rerun()
+        if st.session_state.get(confirm_key):
+            st.warning("Delete this document? This also removes linked diagnoses/medications/findings.")
+            cc1, cc2 = st.columns([1, 3])
+            if cc1.button("Yes, delete", key=f"yes_delete_{did}"):
+                try:
+                    chroma_store.delete("doc_%s" % did)
+                    chroma_store.delete_by_parent(did)
+                except Exception:
+                    pass
+                delete_document_cascade(did)
+                st.session_state.pop(confirm_key, None)
+                st.success("Deleted.")
+                st.rerun()
+            if cc2.button("Cancel", key=f"no_delete_{did}"):
+                st.session_state.pop(confirm_key, None)
+                st.rerun()
+
+
 def page_psychology():
     st.title("🧠 Psychology & Therapy")
     from memory.db import (list_documents, update_document_category,
@@ -591,20 +682,14 @@ def page_psychology():
         docs = list_documents(category="assessment")
         if docs:
             for d in docs:
-                with st.expander(f"{d.get('filename','Unknown')} ({d.get('doc_type','')})"):
-                    st.caption(f"Uploaded: {d.get('uploaded_at','')}")
-                    st.write(d.get("summary", "") or "")
-                    st.text((d.get("full_text", "") or "")[:1500])
+                _render_doc_card(d, category="assessment")
         else:
             st.info("No assessment documents yet.")
     with tabT:
         docs = list_documents(category="therapy")
         if docs:
             for d in docs:
-                with st.expander(f"{d.get('filename','Unknown')} ({d.get('doc_type','')})"):
-                    st.caption(f"Uploaded: {d.get('uploaded_at','')}")
-                    st.write(d.get("summary", "") or "")
-                    st.text((d.get("full_text", "") or "")[:1500])
+                _render_doc_card(d, category="therapy")
         else:
             st.info("No therapy documents yet.")
 

@@ -185,6 +185,17 @@ def delete_document(did):
     c.close()
 
 
+def delete_document_cascade(did):
+    """Delete a document and everything linked to it (diagnoses, medications, findings)."""
+    c = _conn()
+    c.execute("DELETE FROM documents WHERE id=?", (did,))
+    c.execute("DELETE FROM diagnoses WHERE source_doc_id=?", (did,))
+    c.execute("DELETE FROM medications WHERE source_doc_id=?", (did,))
+    c.execute("DELETE FROM findings WHERE source_doc_id=?", (did,))
+    c.commit()
+    c.close()
+
+
 def get_document(did):
     c = _conn()
     r = c.execute("SELECT * FROM documents WHERE id=?", (did,)).fetchone()
