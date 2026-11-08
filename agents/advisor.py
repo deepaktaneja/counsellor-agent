@@ -58,10 +58,12 @@ def build_context(question: str, observation: str = "", prev_question: str = "",
     psych_summary = db.get_latest_psychology_summary()
     # RAG retrieval
     query_text = " ".join([question, observation]).strip()
-    hits = chroma_store.query(query_text, k=5) if query_text else []
+    hits = chroma_store.query(query_text, k=8) if query_text else []
     past = []
     for doc, meta in hits:
-        past.append(f"- {doc[:300]}")
+        page = meta.get("page")
+        tag = " [p%d]" % page if page else ""
+        past.append("- %s%s" % (tag, doc[:700]))
     past_block = "\n".join(past) if past else "None yet."
     prev_block = ""
     if prev_question or prev_advice:

@@ -23,9 +23,22 @@ def ingest_pdf(path: str, filename: str, doc_type_override: str = None, category
                               summary=data.get("summary", ""), full_text=text,
                               file_path=str(dest))
     _store_structured(doc_id, data)
-    chroma_store.add_text(f"doc_{doc_id}", text[:8000], {"type": "document", "doc_id": doc_id, "doc_type": doc_type, "category": category, "pages": len(pages)})
+    # remove any previously stored chunks for this document (re-ingest safety)
+    chroma_store.delete("doc_%s" % doc_id)
+    chroma_store.delete_by_parent(doc_id)
+    chunk_ids = []
+    for i, page_text in enumerate(pages, 1):
+        if not page_text.strip() or page_text.startswith("[No text"):
+            continue
+        page_chunk = f"--- Page {i} of {len(pages)} ---\n{page_text}"
+        chunk_ids += chroma_store.add_chunked(
+            "doc_%s_page_%d" % (doc_id, i), page_chunk,
+            metadata={"type": "document", "doc_id": doc_id, "doc_type": doc_type,
+                      "category": category, "page": i, "pages": len(pages)},
+            chunk_size=1000, chunk_overlap=200)
     pages_with_text = sum(1 for p in pages if p and not p.startswith("[No text"))
-    return {"doc_id": doc_id, "data": data, "text": text, "doc_type": doc_type, "category": category, "pages": len(pages), "pages_with_text": pages_with_text}
+    return {"doc_id": doc_id, "data": data, "text": text, "doc_type": doc_type, "category": category,
+            "pages": len(pages), "pages_with_text": pages_with_text, "chunk_ids": chunk_ids}
 
 
 def ingest_image(path: str, filename: str, doc_type_override: str = None, category_override: str = None) -> dict:
@@ -50,7 +63,12 @@ def ingest_image(path: str, filename: str, doc_type_override: str = None, catego
                               summary=data.get("summary", ""), full_text=text,
                               file_path=str(dest))
     _store_structured(doc_id, data)
-    chroma_store.add_text(f"doc_{doc_id}", text[:4000], {"type": "document", "doc_id": doc_id, "doc_type": doc_type, "category": category})
+    chroma_store.delete("doc_%s" % doc_id)
+    chroma_store.delete_by_parent(doc_id)
+    chroma_store.add_chunked(
+        "doc_%s" % doc_id, text,
+        metadata={"type": "document", "doc_id": doc_id, "doc_type": doc_type, "category": category,
+                  "page": 1, "pages": 1}, chunk_size=1000, chunk_overlap=200)
     # if situational photo, also save as observation
     if data.get("doc_type") == "situational_photo":
         obs_text = data.get("summary") or text[:200]
