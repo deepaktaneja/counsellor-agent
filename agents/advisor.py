@@ -220,6 +220,81 @@ def compact_observations(threshold=20, batch_size=10, keep_recent=10):
     return new_summary
 
 
+def summarize_psychology_incrementally() -> str:
+    """Summarize psychology assessments & therapy notes page by page, accumulating into one summary.
+
+    Each page gets its own LLM call: PREVIOUS SUMMARY + NEW PAGE CONTENT -> UPDATED SUMMARY.
+    This avoids 'lost in the middle' where a single long block only surfaces the last pages.
+    """
+    from memory import db
+    docs = []
+    for cat in ("assessment", "therapy"):
+        docs.extend(db.list_documents(category=cat))
+    # dedupe by id
+    seen = set()
+    unique_docs = []
+    for d in docs:
+        if d.get("id") not in seen:
+            seen.add(d.get("id"))
+            unique_docs.append(d)
+    if not unique_docs:
+        return "No psychology assessments or therapy notes recorded."
+
+    # collect pages in order across all docs
+    pages = []  # (filename, doc_type, page_num, page_text)
+    for d in unique_docs:
+        full_text = (d.get("full_text") or "").strip()
+        if not full_text:
+            continue
+        page_marker = "--- Page "
+        parts = full_text.split(page_marker)
+        if len(parts) > 1:
+            for part in parts[1:]:
+                header_end = part.find(" ---\n")
+                if header_end != -1:
+                    header = part[:header_end]
+                    page_num = header.split(" of ")[0].strip()
+                    page_text = part[header_end + 5:]
+                else:
+                    page_num = "?"
+                    page_text = part
+                pages.append((d.get("filename", "doc"), d.get("doc_type", ""), page_num, page_text.strip()))
+        else:
+            pages.append((d.get("filename", "doc"), d.get("doc_type", ""), "?", full_text))
+
+    if not pages:
+        return "No psychology content found."
+
+    running_summary = ""
+    total = len(pages)
+    for idx, (fname, dtype, pnum, ptext) in enumerate(pages, 1):
+        if not ptext or ptext.startswith("[No text"):
+            continue
+        system = (
+            "You maintain a concise clinical summary of a young autistic adult with severe OCD. "
+            "Merge the NEW PAGE CONTENT into the PREVIOUS SUMMARY. "
+            "Keep it under 200 words. Focus on diagnoses, current therapy approach, goals, progress, concerns. "
+            "Do not invent facts. Return plain text only."
+        )
+        user = (
+            f"PREVIOUS SUMMARY:\n{running_summary or '(none yet)'}\n\n"
+            f"NEW PAGE CONTENT (page {pnum} of {fname}, {dtype}):\n{ptext[:2500]}\n\n"
+            "Updated summary:"
+        )
+        try:
+            new_summary = _ollama_chat(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": user}]
+            ).strip()
+            if new_summary:
+                running_summary = new_summary
+        except Exception:
+            # keep running summary on failure; don't abort the whole run
+            pass
+
+    return running_summary or "No psychology content could be summarized."
+
+
 def summarize_and_clear_observations():
     try:
         rows = db.list_observations(limit=10000)

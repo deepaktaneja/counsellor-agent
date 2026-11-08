@@ -701,30 +701,27 @@ def page_psychology():
     else:
         st.caption("None yet.")
     if st.button("🧠 Generate / refresh summary"):
-        from agents.advisor import _ollama_chat
+        from agents.advisor import summarize_psychology_incrementally
         from memory.db import list_documents
-        ctx = psychology_text()
         # report how many pages were read so the user can confirm all pages are included
         total_pages = 0
         for cat in ("assessment", "therapy"):
             for d in list_documents(category=cat):
                 ft = d.get("full_text") or ""
                 total_pages += ft.count("--- Page ")
-        system = ("You maintain a concise clinical summary of a young autistic adult with severe OCD "
-                  "based on psychology assessments and therapy notes. Keep under 150 words. "
-                  "Focus on diagnoses, current therapy approach, goals, progress, concerns. "
-                  "Do not invent facts. Return plain text only.")
-        user = f"SOURCE MATERIAL (pages read: {total_pages}):\n{ctx}\n\nConsolidated summary:"
         try:
-            with st.spinner("Summarizing..."):
-                new = _ollama_chat([{"role": "system", "content": system},
-                                    {"role": "user", "content": user}]).strip()
-            if new:
+            with st.spinner(f"Summarizing {total_pages} page(s) one at a time..."):
+                new = summarize_psychology_incrementally()
+            if new and new not in ("No psychology assessments or therapy notes recorded.",
+                                   "No psychology content found.",
+                                   "No psychology content could be summarized."):
                 save_psychology_summary(new, len(list_documents(category="assessment")) + len(list_documents(category="therapy")))
                 st.success("Saved.")
                 st.caption(f"Pages read from uploaded documents: {total_pages}")
                 st.write(new)
                 st.rerun()
+            else:
+                st.info(new)
         except Exception as e:
             st.error(f"Failed: {e}")
 
