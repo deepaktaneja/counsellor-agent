@@ -54,16 +54,24 @@ def build_context(question: str, observation: str = "", prev_question: str = "",
     structured = db.profile_text()
     meds = db.current_medications_text()
     dx = db.diagnoses_text()
-    psych = db.psychology_text()
     psych_summary = db.get_latest_psychology_summary()
+    # safety-truncate long sections so no single section blows the context window
+    def _cap(s, n=700):
+        s = s or ""
+        return s[:n] + ("...[truncated]..." if len(s) > n else "")
+    profile = _cap(profile, 600)
+    structured = _cap(structured, 600)
+    meds = _cap(meds, 400)
+    dx = _cap(dx, 400)
+    psych_summary = _cap(psych_summary, 600)
     # RAG retrieval
     query_text = " ".join([question, observation]).strip()
-    hits = chroma_store.query(query_text, k=8) if query_text else []
+    hits = chroma_store.query(query_text, k=5) if query_text else []
     past = []
     for doc, meta in hits:
         page = meta.get("page")
         tag = " [p%d]" % page if page else ""
-        past.append("- %s%s" % (tag, doc[:700]))
+        past.append("- %s%s" % (tag, doc[:500]))
     past_block = "\n".join(past) if past else "None yet."
     prev_block = ""
     if prev_question or prev_advice:
@@ -78,8 +86,7 @@ CURRENT MEDICATIONS: {meds}
 DIAGNOSES: {dx}
 
 PSYCHOLOGY ASSESSMENTS & THERAPY:
-{psych}
-CACHED PSYCHOLOGY SUMMARY: {psych_summary or "None yet."}
+{psych_summary or "None yet."}
 
 RELEVANT PAST OBSERVATIONS:
 {past_block}
