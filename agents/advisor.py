@@ -221,12 +221,14 @@ def compact_observations(threshold=20, batch_size=10, keep_recent=10):
 
 
 def summarize_psychology_incrementally() -> str:
-    """Summarize psychology assessments & therapy notes page by page, accumulating into one summary.
+    """Three-pass psychology summarization.
 
-    Each page gets its own LLM call: PREVIOUS SUMMARY + NEW PAGE CONTENT -> UPDATED SUMMARY.
-    This avoids 'lost in the middle' where a single long block only surfaces the last pages.
+    Pass 1: Summarize each page individually and store per-page summaries in DB.
+    Pass 2: Cumulatively accumulate page summaries into one running summary.
+    Pass 3: Final polish pass on the complete accumulated summary.
     """
     from memory import db
+
     docs = []
     for cat in ("assessment", "therapy"):
         docs.extend(db.list_documents(category=cat))
@@ -241,7 +243,7 @@ def summarize_psychology_incrementally() -> str:
         return "No psychology assessments or therapy notes recorded."
 
     # collect pages in order across all docs
-    pages = []  # (filename, doc_type, page_num, page_text)
+    pages = []  # (doc_id, filename, doc_type, page_num, page_text)
     for d in unique_docs:
         full_text = (d.get("full_text") or "").strip()
         if not full_text:
@@ -258,27 +260,53 @@ def summarize_psychology_incrementally() -> str:
                 else:
                     page_num = "?"
                     page_text = part
-                pages.append((d.get("filename", "doc"), d.get("doc_type", ""), page_num, page_text.strip()))
+                pages.append((d.get("id"), d.get("filename", "doc"), d.get("doc_type", ""), page_num, page_text.strip()))
         else:
-            pages.append((d.get("filename", "doc"), d.get("doc_type", ""), "?", full_text))
+            pages.append((d.get("id"), d.get("filename", "doc"), d.get("doc_type", ""), "?", full_text))
 
     if not pages:
         return "No psychology content found."
 
-    running_summary = ""
-    total = len(pages)
-    for idx, (fname, dtype, pnum, ptext) in enumerate(pages, 1):
+    # ---- Pass 1: summarize each page individually, store in DB ----
+    db.delete_psychology_page_summaries()  # clear stale entries
+    page_summaries = []  # (doc_id, filename, doc_type, page_num, summary)
+    for idx, (doc_id, fname, dtype, pnum, ptext) in enumerate(pages, 1):
         if not ptext or ptext.startswith("[No text"):
             continue
         system = (
+            "You are summarizing one page of a psychology/therapy assessment report "
+            "about a young autistic adult with severe OCD. Extract only what is on this page. "
+            "Focus on diagnoses, observations, test scores, medication, therapy, concerns. "
+            "Do not invent facts. Return plain text only, under 150 words."
+        )
+        user = f"PAGE {pnum} of {fname} ({dtype}):\n{ptext[:3000]}\n\nSummary of this page:"
+        try:
+            page_summary = _ollama_chat(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": user}]
+            ).strip()
+            if page_summary:
+                db.save_psychology_page_summary(doc_id, pnum, page_summary)
+                page_summaries.append((doc_id, fname, dtype, pnum, page_summary))
+        except Exception:
+            pass
+
+    if not page_summaries:
+        return "No psychology content could be summarized."
+
+    # ---- Pass 2: cumulative accumulation across pages ----
+    running_summary = ""
+    total = len(page_summaries)
+    for idx, (doc_id, fname, dtype, pnum, psummary) in enumerate(page_summaries, 1):
+        system = (
             "You maintain a concise clinical summary of a young autistic adult with severe OCD. "
-            "Merge the NEW PAGE CONTENT into the PREVIOUS SUMMARY. "
+            "Merge the NEW PAGE SUMMARY into the PREVIOUS SUMMARY. "
             "Keep it under 200 words. Focus on diagnoses, current therapy approach, goals, progress, concerns. "
             "Do not invent facts. Return plain text only."
         )
         user = (
             f"PREVIOUS SUMMARY:\n{running_summary or '(none yet)'}\n\n"
-            f"NEW PAGE CONTENT (page {pnum} of {fname}, {dtype}):\n{ptext[:2500]}\n\n"
+            f"NEW PAGE SUMMARY (page {pnum} of {fname}, {dtype}):\n{psummary}\n\n"
             "Updated summary:"
         )
         try:
@@ -289,7 +317,25 @@ def summarize_psychology_incrementally() -> str:
             if new_summary:
                 running_summary = new_summary
         except Exception:
-            # keep running summary on failure; don't abort the whole run
+            pass
+
+    # ---- Pass 3: final polish pass on the complete accumulated summary ----
+    if running_summary:
+        system = (
+            "You are producing a final, concise clinical summary of a young autistic adult with severe OCD. "
+            "Polish the following accumulated summary into a clear, well-organized paragraph. "
+            "Keep it under 200 words. Focus on diagnoses, current therapy approach, goals, progress, concerns. "
+            "Do not invent facts. Return plain text only."
+        )
+        user = f"ACCUMULATED SUMMARY:\n{running_summary}\n\nFinal polished summary:"
+        try:
+            final_summary = _ollama_chat(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": user}]
+            ).strip()
+            if final_summary:
+                running_summary = final_summary
+        except Exception:
             pass
 
     return running_summary or "No psychology content could be summarized."

@@ -700,6 +700,17 @@ def page_psychology():
         st.write(_ps)
     else:
         st.caption("None yet.")
+    # show per-page summaries for verification
+    try:
+        from memory.db import get_psychology_page_summaries
+        _page_sums = get_psychology_page_summaries()
+        if _page_sums:
+            with st.expander(f"View per-page summaries ({len(_page_sums)} pages)"):
+                for ps in _page_sums:
+                    st.markdown(f"**Doc {ps['doc_id']} — Page {ps['page_num']}:**")
+                    st.write(ps["page_summary"])
+    except Exception:
+        pass
     if st.button("🧠 Generate / refresh summary"):
         from agents.advisor import summarize_psychology_incrementally
         from memory.db import list_documents

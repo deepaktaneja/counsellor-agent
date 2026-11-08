@@ -79,6 +79,13 @@ def init_db():
         summary TEXT NOT NULL,
         doc_count INTEGER DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS psychology_page_summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        doc_id INTEGER NOT NULL,
+        page_num TEXT NOT NULL,
+        page_summary TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
     """)
     c.commit()
     try:
@@ -192,6 +199,7 @@ def delete_document_cascade(did):
     c.execute("DELETE FROM diagnoses WHERE source_doc_id=?", (did,))
     c.execute("DELETE FROM medications WHERE source_doc_id=?", (did,))
     c.execute("DELETE FROM findings WHERE source_doc_id=?", (did,))
+    c.execute("DELETE FROM psychology_page_summaries WHERE doc_id=?", (did,))
     c.commit()
     c.close()
 
@@ -549,3 +557,38 @@ def list_psychology_summaries(limit=10):
     rows = c.execute("SELECT * FROM psychology_summaries ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     c.close()
     return [dict(r) for r in rows]
+
+
+def save_psychology_page_summary(doc_id, page_num, page_summary):
+    c = _conn()
+    cur = c.cursor()
+    cur.execute(
+        "INSERT INTO psychology_page_summaries (doc_id, page_num, page_summary, created_at) VALUES (?,?,?,?)",
+        (doc_id, str(page_num), page_summary, _now()),
+    )
+    c.commit()
+    rid = cur.lastrowid
+    c.close()
+    return rid
+
+
+def get_psychology_page_summaries(doc_id=None):
+    c = _conn()
+    if doc_id is not None:
+        rows = c.execute(
+            "SELECT * FROM psychology_page_summaries WHERE doc_id=? ORDER BY page_num", (doc_id,)
+        ).fetchall()
+    else:
+        rows = c.execute("SELECT * FROM psychology_page_summaries ORDER BY doc_id, page_num").fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+
+def delete_psychology_page_summaries(doc_id=None):
+    c = _conn()
+    if doc_id is not None:
+        c.execute("DELETE FROM psychology_page_summaries WHERE doc_id=?", (doc_id,))
+    else:
+        c.execute("DELETE FROM psychology_page_summaries")
+    c.commit()
+    c.close()
