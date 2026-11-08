@@ -535,7 +535,12 @@ def _upload_widget(key_prefix):
         if st.button("Ingest", key=f"ing_{key_prefix}"):
             with st.spinner("Ingesting..."):
                 res = _handle_upload(uploaded, category_override=co)
-            st.success(f"Ingested as '{res.get('category','')}' (doc_type: {res.get('doc_type','')})")
+            msg = f"Ingested as '{res.get('category','')}' (doc_type: {res.get('doc_type','')})"
+            if res.get("pages"):
+                msg += f" — Read {res['pages']} page(s), {res.get('pages_with_text', res['pages'])} with text."
+            st.success(msg)
+            if res.get("pages") and res.get("pages_with_text", res["pages"]) < res["pages"]:
+                st.warning(f"{res['pages'] - res.get('pages_with_text', 0)} page(s) had no extractable text (possibly scanned images).")
             st.caption((res.get("data", {}) or {}).get("summary", "")[:300])
             st.rerun()
 

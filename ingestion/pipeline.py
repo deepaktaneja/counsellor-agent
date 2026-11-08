@@ -7,22 +7,25 @@ from memory import db, chroma_store
 
 
 def ingest_pdf(path: str, filename: str, doc_type_override: str = None, category_override: str = None) -> dict:
-    text = pdf_parser.extract_pdf_text(path)
+    from ingestion import pdf_parser
+    pages = pdf_parser.extract_pdf_pages(path)
+    text = "\n\n".join(f"--- Page {i} of {len(pages)} ---\n{p}" for i, p in enumerate(pages, 1))
     # copy file
     dest = FILES_DIR / filename
     try:
         shutil.copy2(path, dest)
     except Exception:
         dest = Path(path)
-    data = extractor.extract_structured(text)
+    data = extractor.extract_structured(text[:16000])
     doc_type = doc_type_override or data.get("doc_type", "other")
     category = category_override or _category_from_type(doc_type)
     doc_id = db.save_document(filename=filename, doc_type=doc_type, category=category,
                               summary=data.get("summary", ""), full_text=text,
                               file_path=str(dest))
     _store_structured(doc_id, data)
-    chroma_store.add_text(f"doc_{doc_id}", text[:4000], {"type": "document", "doc_id": doc_id, "doc_type": doc_type, "category": category})
-    return {"doc_id": doc_id, "data": data, "text": text, "doc_type": doc_type, "category": category}
+    chroma_store.add_text(f"doc_{doc_id}", text[:8000], {"type": "document", "doc_id": doc_id, "doc_type": doc_type, "category": category, "pages": len(pages)})
+    pages_with_text = sum(1 for p in pages if p and not p.startswith("[No text"))
+    return {"doc_id": doc_id, "data": data, "text": text, "doc_type": doc_type, "category": category, "pages": len(pages), "pages_with_text": pages_with_text}
 
 
 def ingest_image(path: str, filename: str, doc_type_override: str = None, category_override: str = None) -> dict:
