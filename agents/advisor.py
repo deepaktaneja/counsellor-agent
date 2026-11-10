@@ -1,8 +1,10 @@
 """Advisor agent: extract observation/question, RAG context, generate advice."""
 import json
+import re
 import ollama
 from config import LLM_MODEL, OLLAMA_BASE_URL, PROFILE_PATH
 from memory import db, chroma_store
+from memory.db import _profile_to_patient
 from safety.guard import sanitize_output
 
 
@@ -19,10 +21,18 @@ def _ollama_chat(messages, format=None):
     return resp["message"]["content"]
 
 
-def extract_observation_question(text: str) -> dict:
-    """Split a spoken utterance into {observation, question}."""
+def extract_observation_question(text: str, mode: str = "parent") -> dict:
+    """Split a spoken utterance into {observation, question}.
+
+    In patient mode the user speaks as the patient directly, so there is no
+    parent/son split — the whole text is treated as the patient's question.
+    """
     if not text or not text.strip():
         return {"observation": "", "question": ""}
+    mode = (mode or "parent").lower()
+    if mode == "patient":
+        # Patient speaks directly; treat the whole utterance as their question
+        return {"observation": "", "question": text.strip()}
     system = (
         "You split a parent's spoken sentence into two parts. "
         "Return ONLY valid JSON with keys 'observation' and 'question'. "
@@ -49,7 +59,54 @@ def extract_observation_question(text: str) -> dict:
         return {"observation": text.strip(), "question": ""}
 
 
-def build_context(question: str, observation: str = "", prev_question: str = "", prev_advice: str = "") -> str:
+def _patient_perspective(text: str) -> str:
+    """Convert third-person references to a person (he/she/they) into second-person
+    (you/your) for patient mode, so the voice advisor addresses the patient directly
+    instead of talking about them as 'he', 'she' or 'they'.
+    """
+    if not text:
+        return text
+
+    # Ordered longest-first so contracted forms are handled before shorter ones.
+    # Word boundaries prevent mangling unrelated words (e.g. 'the', 'theme').
+    replacements = [
+        ("they're", "you're"), ("she's", "you're"), ("he's", "you're"),
+        ("they'd", "you'd"), ("she'd", "you'd"), ("he'd", "you'd"),
+        ("they'll", "you'll"), ("she'll", "you'll"), ("he'll", "you'll"),
+        ("they've", "you've"),
+        ("themselves", "yourselves"), ("herself", "yourself"), ("himself", "yourself"),
+        ("theirs", "yours"), ("hers", "yours"),
+        ("their", "your"), ("his", "your"),
+        ("them", "you"), ("her", "you"), ("him", "you"),
+        ("they", "you"), ("she", "you"), ("he", "you"),
+    ]
+
+    _MAP = {old: new for old, new in replacements}
+
+    def _replace(match: re.Match) -> str:
+        original = match.group(0)
+        replacement = _MAP[original.lower()]
+        if original.isupper():
+            return replacement.upper()
+        if original[:1].isupper():
+            return replacement[:1].upper() + replacement[1:]
+        return replacement
+
+    result = text
+    for old, new in replacements:
+        # Use a normal string with an escaped backslash so the file contains
+        # r"\b" (regex word boundary) and never a literal backspace char.
+        pattern = re.compile("\\b" + re.escape(old) + "\\b", flags=re.IGNORECASE)
+        result = pattern.sub(_replace, result)
+    return result
+
+
+
+
+
+
+
+def build_context(question: str, observation: str = "", prev_question: str = "", prev_advice: str = "", mode: str = "parent") -> str:
     profile = load_profile()
     structured = db.profile_text()
     meds = db.current_medications_text()
@@ -64,18 +121,30 @@ def build_context(question: str, observation: str = "", prev_question: str = "",
     meds = _cap(meds, 400)
     dx = _cap(dx, 400)
     psych_summary = _cap(psych_summary, 600)
-    # RAG retrieval
+    # RAG retrieval — targeted queries by type so the LLM gets relevant context
     query_text = " ".join([question, observation]).strip()
-    hits = chroma_store.query(query_text, k=5) if query_text else []
+    obs_hits = chroma_store.query(query_text, k=5, where={"type": "observation"}) if query_text else []
+    doc_hits = chroma_store.query(query_text, k=5, where={"type": {"$in": ["document", "finding", "diagnosis"]}}) if query_text else []
     past = []
-    for doc, meta in hits:
+    for doc, meta in obs_hits + doc_hits:
         page = meta.get("page")
         tag = " [p%d]" % page if page else ""
-        past.append("- %s%s" % (tag, doc[:500]))
+        past.append("- %s%s" % (tag, doc[:800]))
     past_block = "\n".join(past) if past else "None yet."
     prev_block = ""
     if prev_question or prev_advice:
         prev_block = f"\nPREVIOUS CONVERSATION (do not repeat this advice):\nPrevious question: {prev_question}\nPrevious advice given: {prev_advice}\n"
+    if mode == "patient":
+        perspective_note = (
+            "PERSPECTIVE NOTE (very important):\n"
+            "The text above describes ANMOL. You are addressing ANMOL directly.\n"
+            "Always use 'you' and 'your'. Never use 'he', 'him', or 'his' in your response.\n"
+            "If the context says 'He has...' read it as 'You have...' and respond accordingly.\n"
+            "If the context says 'his OCD', read it as 'your OCD'.\n"
+            "Always speak as 'you' to Anmol."
+        )
+    else:
+        perspective_note = ""
     return f"""SON PROFILE (structured):
 {structured}
 
@@ -90,13 +159,15 @@ PSYCHOLOGY ASSESSMENTS & THERAPY:
 
 RELEVANT PAST OBSERVATIONS:
 {past_block}
-{prev_block}"""
+{prev_block}
+{perspective_note}"""
 
 
-def advise(question: str, observation: str = "", prev_question: str = "", prev_advice: str = "", extra_context: str = "") -> str:
+def advise(question: str, observation: str = "", prev_question: str = "", prev_advice: str = "", extra_context: str = "", mode: str = "parent") -> str:
     if not question and not observation:
         return "I didn't catch that. Could you say it again?"
-    ctx = build_context(question, observation, prev_question, prev_advice)
+    mode = (mode or "parent").lower()
+    ctx = build_context(question, observation, prev_question, prev_advice, mode)
     if extra_context.strip():
         ctx = ctx + f"\n\nADDITIONAL OBSERVATION CONTEXT (from past observations):\n{extra_context.strip()}\n"
     follow_up_instruction = ""
@@ -106,25 +177,56 @@ def advise(question: str, observation: str = "", prev_question: str = "", prev_a
             "Do NOT repeat that same advice. Address ONLY the new question briefly. "
             "Keep it to 1-2 short sentences. Reference the previous advice only if needed for context. "
         )
-    system = (
-        "You are a calm, practical advisor for a parent of a 20-year-old autistic (Asperger's) "
-        "son with severe OCD. Give concise, spoken-style advice in 2 short points: "
-        "(1) what is likely happening, (2) what to do right now (graded, small steps). "
-        "Never suggest medication changes. Never provide reassurance that feeds OCD compulsions "
-        "(do not say 'it's locked' / 'you checked enough'). "
-        "Do NOT suggest escalating to or contacting a therapist/counsellor - the parent visits "
-        "the counsellor weekly and she is not reachable between sessions. "
-        "Consider his likes, dislikes and sensory preferences when suggesting activities; prefer calm, familiar options. "
-        "Use plain language, short sentences. Max ~80 words total."
-        + follow_up_instruction
-    )
-    user_msg = f"{ctx}\n\nPARENT SAYS:\nObservation: {observation}\nQuestion: {question}\n\nAdvice:"
+    if mode == "patient":
+        system = (
+            "You are a calm, supportive voice speaking directly to Anmol, a 20-year-old autistic "
+            "person with severe OCD. You are asking me for guidance. "
+            "Use simple, plain language and short sentences. "
+            "Offer gentle coping strategies and grounding ideas you can try right now. "
+            "Be warm, encouraging, and non-judgmental. "
+            "Never suggest medication changes. Never give reassurance that feeds OCD compulsions."
+            "Do NOT suggest escalating to or contacting a therapist/counsellor. "
+            "Max ~80 words total. Always address Anmol as 'you' and 'your' throughout your response."
+            + follow_up_instruction
+        )
+        user_msg = f"{ctx}\n\nANMOL ASKS:\n{question}\n\nYour response:"
+    elif mode == "counsellor":
+        system = (
+            "You are a clinical counsellor speaking to a parent of a 20-year-old autistic "
+            "(Asperger's) son with severe OCD. Give concise, therapeutic-style advice: "
+            "(1) what is likely happening clinically, (2) what to do right now (graded, small steps). "
+            "Never suggest medication changes. Never provide reassurance that feeds OCD compulsions "
+            "(do not say 'it's locked' / 'you checked enough'). "
+            "Do NOT suggest escalating to or contacting a therapist/counsellor - the parent visits "
+            "the counsellor weekly and she is not reachable between sessions. "
+            "Consider his likes, dislikes and sensory preferences; prefer calm, familiar options. "
+            "Use plain language, short sentences. Max ~80 words total."
+            + follow_up_instruction
+        )
+        user_msg = f"{ctx}\n\nPARENT SAYS:\nObservation: {observation}\nQuestion: {question}\n\nAdvice:"
+    else:  # parent mode (default)
+        system = (
+            "You are a calm, practical advisor for a parent of a 20-year-old autistic (Asperger's) "
+            "son with severe OCD. Give concise, spoken-style advice in 2 short points: "
+            "(1) what is likely happening, (2) what to do right now (graded, small steps). "
+            "Never suggest medication changes. Never provide reassurance that feeds OCD compulsions "
+            "(do not say 'it's locked' / 'you checked enough'). "
+            "Do NOT suggest escalating to or contacting a therapist/counsellor - the parent visits "
+            "the counsellor weekly and she is not reachable between sessions. "
+            "Consider his likes, dislikes and sensory preferences when suggesting activities; prefer calm, familiar options. "
+            "Use plain language, short sentences. Max ~80 words total."
+            + follow_up_instruction
+        )
+        user_msg = f"{ctx}\n\nPARENT SAYS:\nObservation: {observation}\nQuestion: {question}\n\nAdvice:"
     try:
         raw = _ollama_chat([
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg},
         ])
-        return sanitize_output(raw.strip())
+        advice = sanitize_output(raw.strip())
+        if mode == "patient":
+            advice = _patient_perspective(advice)
+        return advice
     except Exception as e:
         return f"Sorry, I couldn't generate advice right now: {e}"
 
